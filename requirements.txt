@@ -8,3 +8,5 @@ matplotlib>=3.7
 tqdm>=4.66
 gradio>=4.0
 pytest>=7.4
+
+streamlit>=1.36

@@ -101,3 +101,14 @@ Grad-CAM explanations, cross-dataset evaluation, JPEG/compression augmentation.
 
 ## License
 MIT
+
+## Streamlit Cloud deployment
+
+This repository is ready for Streamlit Community Cloud.
+
+1. Push the **contents of this repository** to GitHub (including the `src/` directory).
+2. In Streamlit Community Cloud, create an app from the repository.
+3. Set the main file to `app.py` and branch to `main`.
+4. Deploy.
+
+If `checkpoints/best.pt` is not present, the app automatically creates an untrained demo checkpoint so the UI can start. Demo predictions are not meaningful for real deepfake detection. Replace it with a trained `best.pt` for real inference.

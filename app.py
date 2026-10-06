@@ -1,75 +1,106 @@
-"""Gradio web demo.  python app.py --checkpoint checkpoints/best.pt"""
-import argparse
-import sys
+"""Streamlit web app for image/video deepfake inference."""
+import tempfile
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+import streamlit as st
 
-import gradio as gr  # noqa: E402
-
+ROOT = Path(__file__).resolve().parent
 from deepfake_detector.predict import DeepfakeDetector  # noqa: E402
+from deepfake_detector.model import build_model  # noqa: E402
+
+CHECKPOINT = ROOT / "checkpoints" / "best.pt"
+DEMO_CHECKPOINT = ROOT / "checkpoints" / "demo.pt"
 
 
-def build_demo(detector, demo_mode=False):
-    def on_image(img):
-        if img is None:
-            raise gr.Error("Please upload an image.")
-        r = detector.predict_image(img)
-        note = "" if r["face_detected"] else "No face detected - analysed the full image (less reliable)."
-        p = r["fake_probability"]
-        return {"Fake": p, "Real": 1 - p}, note
+def ensure_demo_checkpoint():
+    """Create a small untrained checkpoint so the Streamlit UI can start."""
+    if DEMO_CHECKPOINT.exists():
+        return DEMO_CHECKPOINT
+    DEMO_CHECKPOINT.parent.mkdir(parents=True, exist_ok=True)
+    import torch
 
-    def on_video(path, frames):
-        if not path:
-            raise gr.Error("Please upload a video.")
-        r = detector.predict_video(path, num_frames=int(frames))
-        p = r["fake_probability"]
-        summary = (f"Verdict: {r['label']} | {r['frames_flagged_fake']}/{r['frames_analyzed']} "
-                   f"frames flagged fake | faces found in {r['faces_detected_in_frames']} frames")
-        return {"Fake": p, "Real": 1 - p}, summary
-
-    with gr.Blocks(title="Deepfake Detector") as demo:
-        gr.Markdown("# Deepfake Image & Video Detector\nProbabilistic estimate - not proof. See README for limitations.")
-        if demo_mode:
-            gr.Markdown("⚠️ **Demo mode:** no trained checkpoint was found. The generated checkpoint is only for testing the UI and pipeline; its predictions are **not valid deepfake detection results**. Train the model and use `checkpoints/best.pt` for real inference.")
-        with gr.Tab("Image"):
-            img = gr.Image(type="pil", label="Image")
-            btn = gr.Button("Analyze")
-            lbl, msg = gr.Label(label="Result"), gr.Textbox(label="Notes")
-            btn.click(on_image, img, [lbl, msg])
-        with gr.Tab("Video"):
-            vid = gr.Video(label="Video")
-            n = gr.Slider(4, 64, value=16, step=1, label="Frames to sample")
-            btn2 = gr.Button("Analyze")
-            lbl2, msg2 = gr.Label(label="Result"), gr.Textbox(label="Summary")
-            btn2.click(on_video, [vid, n], [lbl2, msg2])
-    return demo
+    model = build_model(pretrained=False)
+    torch.save({"model_state": model.state_dict(), "img_size": 224, "demo_only": True}, DEMO_CHECKPOINT)
+    return DEMO_CHECKPOINT
 
 
-if __name__ == "__main__":
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--checkpoint", default="checkpoints/best.pt")
-    ap.add_argument("--share", action="store_true")
-    ap.add_argument("--demo", action="store_true", help="Use an untrained checkpoint for UI/pipeline testing.")
-    args = ap.parse_args()
+@st.cache_resource(show_spinner=False)
+def load_detector(checkpoint_path: str):
+    return DeepfakeDetector(checkpoint_path)
 
-    checkpoint = Path(args.checkpoint)
-    demo_mode = args.demo
-    if not checkpoint.exists():
-        if not demo_mode:
-            print(f"Checkpoint not found: {checkpoint}")
-            print("No trained model is bundled with this project.")
-            print("Starting in DEMO mode so the UI remains usable. Run training and restart with a real checkpoint for valid predictions.")
-        demo_checkpoint = Path("checkpoints/demo.pt")
-        if not demo_checkpoint.exists():
-            from scripts.create_demo_checkpoint import main as create_demo_checkpoint
-            old_argv = sys.argv
+
+st.set_page_config(page_title="Deepfake Detector", page_icon="🔎", layout="centered")
+st.title("🔎 Deepfake Image & Video Detector")
+st.caption("Probabilistic estimate — not proof of manipulation.")
+
+if CHECKPOINT.exists():
+    checkpoint = CHECKPOINT
+    st.success("Trained checkpoint found. Real inference mode is active.")
+else:
+    checkpoint = ensure_demo_checkpoint()
+    st.warning(
+        "No trained checkpoint (checkpoints/best.pt) was found. Demo Mode is active. "
+        "Demo predictions are NOT meaningful for real deepfake detection."
+    )
+
+try:
+    detector = load_detector(str(checkpoint))
+except Exception as exc:
+    st.error("Could not load the detector model.")
+    st.exception(exc)
+    st.stop()
+
+mode = st.radio("Input type", ["Image", "Video"], horizontal=True)
+
+if mode == "Image":
+    uploaded = st.file_uploader("Upload an image", type=["jpg", "jpeg", "png", "webp"])
+    if uploaded:
+        st.image(uploaded, caption="Uploaded image", use_container_width=True)
+        if st.button("Analyze image", type="primary"):
             try:
-                sys.argv = ["create_demo_checkpoint", "--output", str(demo_checkpoint)]
-                create_demo_checkpoint()
-            finally:
-                sys.argv = old_argv
-        checkpoint = demo_checkpoint
-        demo_mode = True
+                result = detector.predict_image(uploaded)
+                p = result["fake_probability"]
+                col1, col2 = st.columns(2)
+                col1.metric("Verdict", result["label"])
+                col2.metric("Fake probability", f"{p:.1%}")
+                if not result["face_detected"]:
+                    st.info("No face detected; the full image was analyzed and the result may be less reliable.")
+            except Exception as exc:
+                st.error("Image analysis failed.")
+                st.exception(exc)
 
-    build_demo(DeepfakeDetector(checkpoint), demo_mode=demo_mode).launch(share=args.share)
+else:
+    uploaded = st.file_uploader("Upload a video", type=["mp4", "avi", "mov", "mkv", "webm"])
+    frames = st.slider("Frames to sample", 4, 64, 16)
+    if uploaded:
+        suffix = Path(uploaded.name).suffix or ".mp4"
+        tmp_path = None
+        try:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+                tmp.write(uploaded.getbuffer())
+                tmp_path = tmp.name
+            st.video(uploaded)
+            if st.button("Analyze video", type="primary"):
+                with st.spinner("Analyzing video frames..."):
+                    result = detector.predict_video(tmp_path, num_frames=frames)
+                col1, col2 = st.columns(2)
+                col1.metric("Verdict", result["label"])
+                col2.metric("Fake probability", f"{result['fake_probability']:.1%}")
+                st.write(
+                    f"**Frames flagged fake:** {result['frames_flagged_fake']}/"
+                    f"{result['frames_analyzed']}  "
+                    f"| **Faces found:** {result['faces_detected_in_frames']}"
+                )
+        except Exception as exc:
+            st.error("Video analysis failed.")
+            st.exception(exc)
+        finally:
+            if tmp_path:
+                Path(tmp_path).unlink(missing_ok=True)
+
+with st.expander("About / limitations"):
+    st.write(
+        "This application estimates whether an image or sampled video frames look fake. "
+        "A trained checkpoint is required for meaningful predictions. Results can be wrong, "
+        "especially with unusual lighting, compression, low resolution, or faces not detected."
+    )
