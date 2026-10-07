@@ -1,12 +1,3 @@
-torch>
-torchvision>
-numpy>
-opencv-python>
-Pillow>
-scikit-learn>
-matplotlib>
-tqdm>
-gradio>
-pytest>
-
-streamlit>
+streamlit>=1.38,<2.0
+numpy>=1.26,<3.0
+Pillow>=10.0,<12.0
